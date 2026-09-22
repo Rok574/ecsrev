@@ -26,18 +26,18 @@ jobs:
         with:
           go-version: '1.18'
 
-      - name: Install and Start PostgreSQL on Windows
+      - name: Start Fast PostgreSQL in Docker
         shell: powershell
         run: |
-          choco install postgresql15 --params '/Password:postgres' -y
-          $env:Path += ";C:\Program Files\PostgreSQL\15\bin"
-          echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
+          docker run -d `
+            --name postgres `
+            -p 5432:5432 `
+            -e POSTGRES_USER=postgres `
+            -e POSTGRES_PASSWORD=postgres `
+            -e POSTGRES_DB=ecsrev `
+            postgres:15-alpine
           
-          # Wait for PostgreSQL service to start
           Start-Sleep -Seconds 5
-          & "C:\Program Files\PostgreSQL\15\bin\createdb.exe" -U postgres -h localhost ecsrev
-        env:
-          PGPASSWORD: postgres
 
       - name: Create Required Directories
         shell: powershell
@@ -84,8 +84,11 @@ jobs:
         run: |
           $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
-            (Get-Content $file) -replace 'false', 'true' \vert{} Set-Content$file
+            $content = Get-Content$file
+            $content -replace 'false', 'true' \vert{} Set-Content$file
             Write-Host "Successfully patched ApplicationProcessorService.cs"
+          } else {
+            Write-Host "File not found, skipping patch."
           }
 
       - name: Build Admin Panel
@@ -118,21 +121,18 @@ jobs:
               console.log("Seeding system accounts and Skylight...");
 
               try {
-                // Insert user Skylight with BCrypt hashed password
                 await client.query(`
                   INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
                   VALUES (1, '\''Skylight'\'', $1, true, NOW(), NOW())
                   ON CONFLICT (id) DO UPDATE SET username = '\''Skylight'\'', password = $1, is_admin = true;
                 `, [hashedPassword]);
 
-                // Insert required system account UGC
                 await client.query(`
                   INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
                   VALUES (2, '\''UGC'\'', NULL, false, NOW(), NOW())
                   ON CONFLICT (id) DO NOTHING;
                 `);
 
-                // Insert required system account BadDecisions
                 await client.query(`
                   INSERT INTO "Users" (id, username, password, is_admin, is_banned, created_at, updated_at) 
                   VALUES (12, '\''BadDecisions'\'', '\''banned'\'', false, true, NOW(), NOW())
@@ -176,11 +176,10 @@ jobs:
       - name: Install and Run Cloudflared Tunnel
         shell: powershell
         run: |
-          choco install cloudflared -y
+          choco install cloudflared -y --no-progress
           Write-Host "===================================================="
           Write-Host "Your ECSRev site is starting up!"
           Write-Host "Look for the public *.trycloudflare.com URL below:"
           Write-Host "===================================================="
           
-          # Run cloudflared tunnel pointing to website on localhost:5000
           cloudflared tunnel --url http://localhost:5000
