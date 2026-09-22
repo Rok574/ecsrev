@@ -98,21 +98,48 @@ jobs:
 
           Write-Host "File restore done"
 
-      - name: Install PostgreSQL
+      - name: Cache PostgreSQL binaries
+        id: pg-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\PostgreSQL\15
+          key: postgresql-15.19-win64-v1
+
+      - name: Install or start PostgreSQL
         shell: powershell
         run: |
-          choco install postgresql15 --params "/Password:postgres" -y --no-progress
-          $pgBin = "C:\Program Files\PostgreSQL\15\bin"
+          $pgRoot = "C:\Program Files\PostgreSQL\15"
+          $pgBin = Join-Path $pgRoot "bin"
+          $pgData = Join-Path $pgRoot "data"
+
+          if ("${{ steps.pg-cache.outputs.cache-hit }}" -ne "true") {
+            Write-Host "PostgreSQL cache miss - installing once via Chocolatey"
+            choco install postgresql15 --params "/Password:postgres" -y --no-progress
+          } else {
+            Write-Host "PostgreSQL cache hit - skipping Chocolatey download"
+          }
+
+          if (-not (Test-Path (Join-Path $pgBin "pg_ctl.exe"))) {
+            throw "PostgreSQL bin folder missing after install/cache"
+          }
+
           Add-Content -Path $env:GITHUB_PATH -Value $pgBin
           $env:Path = "$pgBin;" + $env:Path
 
           $svc = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($svc -and $svc.Status -ne "Running") {
-            Start-Service $svc.Name
+          if ($svc) {
+            if ($svc.Status -ne "Running") { Start-Service $svc.Name }
+          } else {
+            if (-not (Test-Path $pgData)) {
+              Write-Host "Initializing new data directory"
+              & "$pgBin\initdb.exe" -D $pgData -U postgres --auth=trust --encoding=UTF8
+            }
+            Write-Host "Starting PostgreSQL with pg_ctl"
+            & "$pgBin\pg_ctl.exe" -D $pgData -l (Join-Path $pgRoot "pg.log") start
           }
 
           $ready = $false
-          for ($i = 0; $i -lt 30; $i++) {
+          for ($i = 0; $i -lt 40; $i++) {
             & "$pgBin\pg_isready.exe" -h 127.0.0.1 -U postgres | Out-Null
             if ($LASTEXITCODE -eq 0) { $ready = $true; break }
             Start-Sleep -Seconds 2
@@ -198,7 +225,7 @@ jobs:
         shell: powershell
         run: |
           npm install pg bcryptjs --no-audit --no-fund
-          $seedJs = Join-Path $env:RUNNER_TEMP "seed-admin.js"
+          $seedJs = Join-Path $env:GITHUB_WORKSPACE "seed-admin.js"
           @'
           const { Client } = require("pg");
           const bcrypt = require("bcryptjs");
