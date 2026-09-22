@@ -34,7 +34,6 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:ADMIN_PASSWORD)) {
             throw "Add repo secret ADMIN_PASSWORD (Settings > Secrets and variables > Actions)."
           }
-          Write-Host "ADMIN_PASSWORD secret is set."
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -70,14 +69,13 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
-          $dirs = @(
+          foreach ($d in @(
             "services\api\public",
             "services\api\public\images\thumbnails",
             "services\api\public\images\groups",
             "services\api\public\UnsecuredContent",
             "services\api\storage\asset"
-          )
-          foreach ($d in $dirs) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+          )) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
           function Restore-Tree($fromRel, $toRel) {
             $from = Join-Path $env:DATA_DIR $fromRel
             if (Test-Path $from) {
@@ -87,7 +85,6 @@ jobs:
           }
           Restore-Tree "files\api-public" "services\api\public"
           Restore-Tree "files\api-storage" "services\api\storage"
-          Write-Host "Folders ready"
 
       - name: PostgreSQL
         shell: powershell
@@ -97,7 +94,7 @@ jobs:
           $pgData = Join-Path $pgRoot "data"
           if ("${{ steps.pg-cache.outputs.cache-hit }}" -ne "true") {
             choco install postgresql15 --params "/Password:postgres" -y --no-progress
-          } else { Write-Host "PostgreSQL cache hit" }
+          }
           if (-not (Test-Path (Join-Path $pgBin "pg_ctl.exe"))) { throw "PostgreSQL missing" }
           Add-Content -Path $env:GITHUB_PATH -Value $pgBin
           $env:Path = "$pgBin;" + $env:Path
@@ -116,7 +113,6 @@ jobs:
           }
           if (-not $ready) { throw "PostgreSQL did not become ready" }
           & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
-          Write-Host "PostgreSQL ready"
 
       - name: Redis
         shell: powershell
@@ -137,33 +133,7 @@ jobs:
             & pg_restore -h 127.0.0.1 -U postgres -d ecsrev --clean --if-exists --no-owner --no-acl $dump
           } elseif (Test-Path $sql) {
             & psql -h 127.0.0.1 -U postgres -d ecsrev -f $sql
-          } else { Write-Host "No previous dump - fresh database" }
-
-      - name: Start Cloudflare tunnel first
-        shell: powershell
-        run: |
-          choco install cloudflared -y --no-progress
-          $logOut = Join-Path $env:RUNNER_TEMP "cloudflared.out.log"
-          $logErr = Join-Path $env:RUNNER_TEMP "cloudflared.err.log"
-          $cf = (Get-Command cloudflared.exe).Source
-          Start-Process -FilePath $cf -ArgumentList "tunnel","--url","http://127.0.0.1:5000","--no-autoupdate" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden
-          $url = $null
-          for ($i = 0; $i -lt 60; $i++) {
-            Start-Sleep -Seconds 2
-            $txt = ""
-            if (Test-Path $logOut) { $txt += [string](Get-Content $logOut -Raw -ErrorAction SilentlyContinue) }
-            if (Test-Path $logErr) { $txt += [string](Get-Content $logErr -Raw -ErrorAction SilentlyContinue) }
-            $m = [regex]::Match($txt, "https://[a-z0-9-]+\.trycloudflare\.com")
-            if ($m.Success) { $url = $m.Value; break }
           }
-          if (-not $url) {
-            if (Test-Path $logOut) { Get-Content $logOut -ErrorAction SilentlyContinue }
-            if (Test-Path $logErr) { Get-Content $logErr -ErrorAction SilentlyContinue }
-            throw "Could not parse trycloudflare URL"
-          }
-          Write-Host "PUBLIC URL = $url"
-          Add-Content -Path $env:GITHUB_ENV -Value "PUBLIC_URL=$url"
-          Set-Content -Path (Join-Path $env:DATA_DIR "public-url.txt") -Value $url
 
       - name: services/api/config.json
         shell: powershell
@@ -182,8 +152,6 @@ jobs:
         working-directory: ./services/Roblox/Roblox.Website
         run: |
           $root = $env:GITHUB_WORKSPACE.Replace('\','\\')
-          $pub = $env:PUBLIC_URL
-          if ([string]::IsNullOrWhiteSpace($pub)) { throw "PUBLIC_URL missing" }
           @"
           {
             "Urls": "http://127.0.0.1:5000",
@@ -199,7 +167,7 @@ jobs:
             "SignupAssetIds": [],
             "SignupAvatarAssetIds": [],
             "CdnBaseUrl": "",
-            "BaseUrl": "$pub",
+            "BaseUrl": "http://127.0.0.1:5000",
             "Authorization": "$env:SITE_AUTH",
             "Postgres": "Host=127.0.0.1; Database=ecsrev; Password=postgres; Username=postgres; Maximum Pool Size=20",
             "Redis": "127.0.0.1",
@@ -225,7 +193,6 @@ jobs:
             "AllowedHosts": "*"
           }
           "@ | Set-Content -Path "appsettings.json"
-          Write-Host "BaseUrl = $pub"
 
       - name: Auto-accept applications
         shell: powershell
@@ -245,17 +212,47 @@ jobs:
           npm install --no-audit --no-fund
           npm run build
 
-      - name: Build frontend with public URL
+      - name: Build frontend
         shell: powershell
         run: |
           $front = "services\2016-roblox-main"
           if (-not (Test-Path (Join-Path $front "package.json"))) { return }
-          $pub = $env:PUBLIC_URL
-          if ([string]::IsNullOrWhiteSpace($pub)) { throw "PUBLIC_URL missing" }
           Push-Location $front
-          $cfg = '{"serverRuntimeConfig":{"backend":{"csrfKey":"gha-frontend-csrf-key"}},"publicRuntimeConfig":{"backend":{"proxyEnabled":true,"flags":{"myAccountPage2016Enabled":true,"catalogGenreFilterSupported":true,"catalogPageLimit":28,"catalogSaleCountVisibleFromDetailsEndpoint":true,"catalogDetailsPageResellerLimit":10,"avatarPageInventoryLimit":10},"baseUrl":"' + $pub + '","apiFormat":"' + $pub + '{1}"}}}'
-          Set-Content -Path "config.json" -Value $cfg
-          Write-Host "frontend baseUrl = $pub"
+          Set-Content -Path "config.json" -Value '{"serverRuntimeConfig":{"backend":{"csrfKey":"gha-frontend-csrf-key"}},"publicRuntimeConfig":{"backend":{"proxyEnabled":true,"flags":{"myAccountPage2016Enabled":true,"catalogGenreFilterSupported":true,"catalogPageLimit":28,"catalogSaleCountVisibleFromDetailsEndpoint":true,"catalogDetailsPageResellerLimit":10,"avatarPageInventoryLimit":10},"baseUrl":"http://127.0.0.1:5000","apiFormat":"{1}"}}}'
+          $req = "lib\request.js"
+          if (Test-Path $req) {
+            @"
+          import axios from 'axios';
+          import config from '../lib/config';
+          let _csrf = '';
+          const getBaseUrl = () => {
+            if (typeof window !== 'undefined' && window.location && window.location.origin) return window.location.origin;
+            return (config.publicRuntimeConfig && config.publicRuntimeConfig.backend && config.publicRuntimeConfig.backend.baseUrl) || '';
+          };
+          const getFullUrl = (apiSite, fullUrl) => getBaseUrl() + fullUrl;
+          const getUrlWithProxy = (url) => url;
+          const request = async (method, url, data) => {
+            const isBrowser = typeof window !== 'undefined';
+            try {
+              let headers = { 'x-csrf-token': _csrf };
+              if (!isBrowser) {
+                const authHeaderValue = config.serverRuntimeConfig && config.serverRuntimeConfig.backend && config.serverRuntimeConfig.backend.authorization;
+                if (typeof authHeaderValue === 'string') headers[(config.serverRuntimeConfig.backend.authorizationHeader) || 'authorization'] = authHeaderValue;
+                headers['user-agent'] = 'Roblox2016/1.0';
+              }
+              return await axios.request({ method, url: getUrlWithProxy(url), data, headers, maxRedirects: 0 });
+            } catch (e) {
+              if (e.response && e.response.status === 403 && e.response.headers['x-csrf-token']) {
+                _csrf = e.response.headers['x-csrf-token'];
+                return await request(method, url, data);
+              }
+              throw e;
+            }
+          };
+          export default request;
+          export { getFullUrl, getBaseUrl, getUrlWithProxy };
+          "@ | Set-Content -Path $req
+          }
           npm install --no-audit --no-fund
           npm run build
           Start-Process -FilePath "npm" -ArgumentList "run","start"
@@ -308,20 +305,7 @@ jobs:
           $gs = "services\game-server"
           if (-not (Test-Path $gs)) { return }
           $rcc = Join-Path $env:GITHUB_WORKSPACE "services\RCCService\RCCService.exe"
-          $pub = $env:PUBLIC_URL
-          $cfg = @"
-          {
-            "rcc": "$($rcc.Replace('\','\\'))",
-            "authorization": "$env:SITE_AUTH",
-            "baseUrl": "$pub",
-            "rccPort": 64989,
-            "port": 3040,
-            "websiteBotAuth": "$env:SITE_AUTH",
-            "thumbnailWebsocketPort": 3189,
-            "dockerDisabled": true
-          }
-          "@
-          Set-Content -Path (Join-Path $gs "config.json") -Value $cfg
+          Set-Content -Path (Join-Path $gs "config.json") -Value ("{`"rcc`":`"" + $rcc.Replace('\','\\') + "`",`"authorization`":`"$env:SITE_AUTH`",`"baseUrl`":`"http://127.0.0.1:5000`",`"rccPort`":64989,`"port`":3040,`"websiteBotAuth`":`"$env:SITE_AUTH`",`"thumbnailWebsocketPort`":3189,`"dockerDisabled`":true}")
           Push-Location $gs
           npm install --no-audit --no-fund
           npm run build
@@ -335,14 +319,19 @@ jobs:
           $env:ASPNETCORE_URLS = "http://127.0.0.1:5000"
           Start-Process -FilePath "dotnet" -ArgumentList "run"
           $up = $false
-          for ($i = 0; $i -lt 60; $i++) {
-            try { Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 3 }
+          for ($i = 0; $i -lt 90; $i++) {
+            try { Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 2 }
           }
-          Write-Host "Open $($env:PUBLIC_URL)"
+          if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "WARNING: website not answering yet" }
 
-      - name: Keep tunnel alive
+      - name: Install cloudflared
+        shell: powershell
+        run: choco install cloudflared -y --no-progress
+
+      - name: Cloudflare tunnel (keep this step running)
         shell: powershell
         run: |
-          Write-Host "SITE: $($env:PUBLIC_URL)"
-          Write-Host "Apply at /auth/application then login. Do not cancel this job."
-          while ($true) { Start-Sleep -Seconds 300; Write-Host "still up $($env:PUBLIC_URL)" }
+          Write-Host "Copy the trycloudflare.com URL from the box below"
+          Write-Host "Apply at /auth/application then log in"
+          Write-Host "Leave this step running or Error 1033 comes back"
+          cloudflared tunnel --url http://127.0.0.1:5000 --no-autoupdate
