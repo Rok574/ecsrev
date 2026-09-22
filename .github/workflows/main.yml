@@ -55,9 +55,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ecsrev-data
-          key: ecsrev-data-v1-${{ github.run_id }}
+          key: ecsrev-data-v2-${{ github.run_id }}
           restore-keys: |
-            ecsrev-data-v1-
+            ecsrev-data-v2-
 
       - name: Cache PostgreSQL binaries
         id: pg-cache
@@ -143,19 +143,24 @@ jobs:
         shell: powershell
         run: |
           choco install cloudflared -y --no-progress
-          $log = Join-Path $env:RUNNER_TEMP "cloudflared.log"
+          $logOut = Join-Path $env:RUNNER_TEMP "cloudflared.out.log"
+          $logErr = Join-Path $env:RUNNER_TEMP "cloudflared.err.log"
           $cf = (Get-Command cloudflared.exe).Source
-          Start-Process -FilePath $cf -ArgumentList "tunnel","--url","http://127.0.0.1:5000","--no-autoupdate" -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Hidden
+          Start-Process -FilePath $cf -ArgumentList "tunnel","--url","http://127.0.0.1:5000","--no-autoupdate" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -WindowStyle Hidden
           $url = $null
           for ($i = 0; $i -lt 60; $i++) {
             Start-Sleep -Seconds 2
-            if (Test-Path $log) {
-              $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
-              $m = [regex]::Match([string]$txt, "https://[a-z0-9-]+\.trycloudflare\.com")
-              if ($m.Success) { $url = $m.Value; break }
-            }
+            $txt = ""
+            if (Test-Path $logOut) { $txt += [string](Get-Content $logOut -Raw -ErrorAction SilentlyContinue) }
+            if (Test-Path $logErr) { $txt += [string](Get-Content $logErr -Raw -ErrorAction SilentlyContinue) }
+            $m = [regex]::Match($txt, "https://[a-z0-9-]+\.trycloudflare\.com")
+            if ($m.Success) { $url = $m.Value; break }
           }
-          if (-not $url) { Get-Content $log -ErrorAction SilentlyContinue; throw "Could not parse trycloudflare URL" }
+          if (-not $url) {
+            if (Test-Path $logOut) { Get-Content $logOut -ErrorAction SilentlyContinue }
+            if (Test-Path $logErr) { Get-Content $logErr -ErrorAction SilentlyContinue }
+            throw "Could not parse trycloudflare URL"
+          }
           Write-Host "PUBLIC URL = $url"
           Add-Content -Path $env:GITHUB_ENV -Value "PUBLIC_URL=$url"
           Set-Content -Path (Join-Path $env:DATA_DIR "public-url.txt") -Value $url
@@ -256,32 +261,6 @@ jobs:
           Start-Process -FilePath "npm" -ArgumentList "run","start"
           Pop-Location
 
-      - name: Seed ROBLOX with Argon2 hash
-        shell: powershell
-        run: |
-          npm install pg argon2 --no-audit --no-fund
-          $seedJs = Join-Path $env:GITHUB_WORKSPACE "seed-admin.js"
-          @'
-          const { Client } = require("pg");
-          const argon2 = require("argon2");
-          (async () => {
-            const raw = process.env.ADMIN_PASSWORD;
-            if (!raw) throw new Error("ADMIN_PASSWORD env is empty");
-            const client = new Client({ host: "127.0.0.1", user: "postgres", password: "postgres", database: "ecsrev" });
-            await client.connect();
-            const hashed = await argon2.hash(raw, { type: argon2.argon2id });
-            const tables = await client.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='user'");
-            if (tables.rowCount === 0) throw new Error("Table user is missing");
-            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (1, 'ROBLOX', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username, password = EXCLUDED.password", [hashed]);
-            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (2, 'UGC', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO NOTHING", [hashed]);
-            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (12, 'BadDecisions', $1, 3, NOW(), NOW()) ON CONFLICT (id) DO NOTHING", [hashed]);
-            const check = await client.query("SELECT id, username FROM \"user\" ORDER BY id");
-            console.log("users:", check.rows);
-            await client.end();
-          })().catch((e) => { console.error(e); process.exit(1); });
-          '@ | Set-Content -Path $seedJs -Encoding utf8
-          node $seedJs
-
       - name: Start background data saver
         shell: powershell
         run: |
@@ -307,7 +286,7 @@ jobs:
             } catch {}
           }
           Save-All
-          while ($true) { Start-Sleep -Seconds 120; Save-All }
+          while ($true) { Start-Sleep -Seconds 60; Save-All }
           '@ | Set-Content -Path $scriptPath -Encoding ascii
           Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath -WindowStyle Hidden
 
@@ -330,7 +309,19 @@ jobs:
           if (-not (Test-Path $gs)) { return }
           $rcc = Join-Path $env:GITHUB_WORKSPACE "services\RCCService\RCCService.exe"
           $pub = $env:PUBLIC_URL
-          Set-Content -Path (Join-Path $gs "config.json") -Value ("{`"rcc`": `"" + $rcc.Replace('\','\\') + "`", `"authorization`": `"$env:SITE_AUTH`", `"baseUrl`": `"$pub`", `"rccPort`": 64989, `"port`": 3040, `"websiteBotAuth`": `"$env:SITE_AUTH`", `"thumbnailWebsocketPort`": 3189, `"dockerDisabled`": true }")
+          $cfg = @"
+          {
+            "rcc": "$($rcc.Replace('\','\\'))",
+            "authorization": "$env:SITE_AUTH",
+            "baseUrl": "$pub",
+            "rccPort": 64989,
+            "port": 3040,
+            "websiteBotAuth": "$env:SITE_AUTH",
+            "thumbnailWebsocketPort": 3189,
+            "dockerDisabled": true
+          }
+          "@
+          Set-Content -Path (Join-Path $gs "config.json") -Value $cfg
           Push-Location $gs
           npm install --no-audit --no-fund
           npm run build
@@ -348,12 +339,10 @@ jobs:
             try { Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 3 }
           }
           Write-Host "Open $($env:PUBLIC_URL)"
-          Write-Host "Login ROBLOX + ADMIN_PASSWORD secret"
 
       - name: Keep tunnel alive
         shell: powershell
         run: |
           Write-Host "SITE: $($env:PUBLIC_URL)"
-          Write-Host "Login: ROBLOX / ADMIN_PASSWORD secret"
-          Write-Host "Do not cancel this job or the URL dies"
+          Write-Host "Apply at /auth/application then login. Do not cancel this job."
           while ($true) { Start-Sleep -Seconds 300; Write-Host "still up $($env:PUBLIC_URL)" }
