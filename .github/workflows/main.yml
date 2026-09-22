@@ -66,7 +66,7 @@ jobs:
           path: C:\Program Files\PostgreSQL\15
           key: postgresql-15.19-win64-v1
 
-      - name: Step 1 - folders + restore files
+      - name: Folders + restore files
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
@@ -82,27 +82,22 @@ jobs:
             $from = Join-Path $env:DATA_DIR $fromRel
             if (Test-Path $from) {
               New-Item -ItemType Directory -Force -Path $toRel | Out-Null
-              Write-Host "Restoring $fromRel"
               & robocopy $from $toRel /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
             }
           }
           Restore-Tree "files\api-public" "services\api\public"
           Restore-Tree "files\api-storage" "services\api\storage"
-          Restore-Tree "files\uploads" "uploads"
           Write-Host "Folders ready"
 
-      - name: Step 1 - PostgreSQL
+      - name: PostgreSQL
         shell: powershell
         run: |
           $pgRoot = "C:\Program Files\PostgreSQL\15"
           $pgBin = Join-Path $pgRoot "bin"
           $pgData = Join-Path $pgRoot "data"
           if ("${{ steps.pg-cache.outputs.cache-hit }}" -ne "true") {
-            Write-Host "Cache miss - Chocolatey install (one time)"
             choco install postgresql15 --params "/Password:postgres" -y --no-progress
-          } else {
-            Write-Host "PostgreSQL cache hit"
-          }
+          } else { Write-Host "PostgreSQL cache hit" }
           if (-not (Test-Path (Join-Path $pgBin "pg_ctl.exe"))) { throw "PostgreSQL missing" }
           Add-Content -Path $env:GITHUB_PATH -Value $pgBin
           $env:Path = "$pgBin;" + $env:Path
@@ -110,9 +105,7 @@ jobs:
           if ($svc) {
             if ($svc.Status -ne "Running") { Start-Service $svc.Name }
           } else {
-            if (-not (Test-Path $pgData)) {
-              & "$pgBin\initdb.exe" -D $pgData -U postgres --auth=trust --encoding=UTF8
-            }
+            if (-not (Test-Path $pgData)) { & "$pgBin\initdb.exe" -D $pgData -U postgres --auth=trust --encoding=UTF8 }
             & "$pgBin\pg_ctl.exe" -D $pgData -l (Join-Path $pgRoot "pg.log") start
           }
           $ready = $false
@@ -122,7 +115,7 @@ jobs:
             Start-Sleep -Seconds 2
           }
           if (-not $ready) { throw "PostgreSQL did not become ready" }
-          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev
+          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
           Write-Host "PostgreSQL ready"
 
       - name: Redis
@@ -130,11 +123,9 @@ jobs:
         run: |
           choco install memurai-developer -y --no-progress
           $m = Get-Command memurai.exe -ErrorAction SilentlyContinue
-          if ($m) { Start-Process $m.Source; Write-Host "Memurai started" }
-          else {
+          if ($m) { Start-Process $m.Source } else {
             $r = Get-Command redis-server.exe -ErrorAction SilentlyContinue
-            if ($r) { Start-Process $r.Source; Write-Host "redis-server started" }
-            else { Write-Host "WARNING: Redis not found" }
+            if ($r) { Start-Process $r.Source }
           }
 
       - name: Restore database dump if present
@@ -143,34 +134,51 @@ jobs:
           $dump = Join-Path $env:DATA_DIR "ecsrev.dump"
           $sql  = Join-Path $env:DATA_DIR "ecsrev.sql"
           if (Test-Path $dump) {
-            Write-Host "Restoring dump"
             & pg_restore -h 127.0.0.1 -U postgres -d ecsrev --clean --if-exists --no-owner --no-acl $dump
           } elseif (Test-Path $sql) {
-            Write-Host "Restoring sql"
             & psql -h 127.0.0.1 -U postgres -d ecsrev -f $sql
-          } else {
-            Write-Host "No previous dump - fresh database"
-          }
+          } else { Write-Host "No previous dump - fresh database" }
 
-      - name: Step 1 - services/api/config.json
+      - name: Start Cloudflare tunnel first
+        shell: powershell
+        run: |
+          choco install cloudflared -y --no-progress
+          $log = Join-Path $env:RUNNER_TEMP "cloudflared.log"
+          $cf = (Get-Command cloudflared.exe).Source
+          Start-Process -FilePath $cf -ArgumentList "tunnel","--url","http://127.0.0.1:5000","--no-autoupdate" -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Hidden
+          $url = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $log) {
+              $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
+              $m = [regex]::Match([string]$txt, "https://[a-z0-9-]+\.trycloudflare\.com")
+              if ($m.Success) { $url = $m.Value; break }
+            }
+          }
+          if (-not $url) { Get-Content $log -ErrorAction SilentlyContinue; throw "Could not parse trycloudflare URL" }
+          Write-Host "PUBLIC URL = $url"
+          Add-Content -Path $env:GITHUB_ENV -Value "PUBLIC_URL=$url"
+          Set-Content -Path (Join-Path $env:DATA_DIR "public-url.txt") -Value $url
+
+      - name: services/api/config.json
         shell: powershell
         working-directory: ./services/api
-        run: |
-          Set-Content -Path "config.json" -Value '{"knex":{"client":"pg","connection":{"host":"127.0.0.1","user":"postgres","password":"postgres","database":"ecsrev"}}}'
+        run: Set-Content -Path "config.json" -Value '{"knex":{"client":"pg","connection":{"host":"127.0.0.1","user":"postgres","password":"postgres","database":"ecsrev"}}}'
 
-      - name: Step 2 - npm i + knex migrate
+      - name: npm i + knex migrate
         shell: powershell
         working-directory: ./services/api
         run: |
           npm install --no-audit --no-fund
           npx knex migrate:latest
-          & psql -h 127.0.0.1 -U postgres -d ecsrev -c "\dt"
 
-      - name: Step 3 - appsettings.json from official example
+      - name: appsettings.json
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
           $root = $env:GITHUB_WORKSPACE.Replace('\','\\')
+          $pub = $env:PUBLIC_URL
+          if ([string]::IsNullOrWhiteSpace($pub)) { throw "PUBLIC_URL missing" }
           @"
           {
             "Urls": "http://127.0.0.1:5000",
@@ -186,7 +194,7 @@ jobs:
             "SignupAssetIds": [],
             "SignupAvatarAssetIds": [],
             "CdnBaseUrl": "",
-            "BaseUrl": "http://127.0.0.1:5000",
+            "BaseUrl": "$pub",
             "Authorization": "$env:SITE_AUTH",
             "Postgres": "Host=127.0.0.1; Database=ecsrev; Password=postgres; Username=postgres; Maximum Pool Size=20",
             "Redis": "127.0.0.1",
@@ -212,90 +220,63 @@ jobs:
             "AllowedHosts": "*"
           }
           "@ | Set-Content -Path "appsettings.json"
-          Write-Host "appsettings.json written with Windows paths"
+          Write-Host "BaseUrl = $pub"
 
-      - name: Auto-accept applications (docs step 6)
+      - name: Auto-accept applications
         shell: powershell
         run: |
           $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
             $content = Get-Content $file -Raw
             $patched = $content -replace "autoAccept\s*=\s*false", "autoAccept = true"
-            if ($patched -eq $content) {
-              $patched = $content -replace "AutoAccept\s*=\s*false", "AutoAccept = true"
-            }
+            if ($patched -eq $content) { $patched = $content -replace "AutoAccept\s*=\s*false", "AutoAccept = true" }
             Set-Content -Path $file -Value $patched -NoNewline
-            Write-Host "Patched ApplicationProcessorService.cs"
-          } else {
-            Write-Host "ApplicationProcessorService.cs not found"
           }
 
-      - name: Step 5 - build admin panel
+      - name: Build admin panel
         shell: powershell
         working-directory: ./services/admin
         run: |
           npm install --no-audit --no-fund
           npm run build
 
-      - name: Step 6 - build frontend (2016-roblox-main)
+      - name: Build frontend with public URL
         shell: powershell
         run: |
-          $front = $null
-          foreach ($c in @(
-            "services\2016-roblox-main",
-            "services\2016-roblox-main\docs",
-            "2016-roblox-main"
-          )) {
-            if (Test-Path (Join-Path $c "package.json")) { $front = $c; break }
-          }
-          if (-not $front) {
-            Write-Host "Frontend folder not found - skip"
-            return
-          }
-          Write-Host "Building frontend in $front"
+          $front = "services\2016-roblox-main"
+          if (-not (Test-Path (Join-Path $front "package.json"))) { return }
+          $pub = $env:PUBLIC_URL
+          if ([string]::IsNullOrWhiteSpace($pub)) { throw "PUBLIC_URL missing" }
           Push-Location $front
-          Set-Content -Path "config.json" -Value '{"serverRuntimeConfig":{"backend":{"csrfKey":"gha-frontend-csrf-key"}},"publicRuntimeConfig":{"backend":{"proxyEnabled":true,"flags":{"myAccountPage2016Enabled":true,"catalogGenreFilterSupported":true,"catalogPageLimit":28,"catalogSaleCountVisibleFromDetailsEndpoint":true,"catalogDetailsPageResellerLimit":10,"avatarPageInventoryLimit":10},"baseUrl":"","apiFormat":"{1}"}}}'
-          Write-Host "Wrote frontend config.json (same-origin URLs)"
+          $cfg = '{"serverRuntimeConfig":{"backend":{"csrfKey":"gha-frontend-csrf-key"}},"publicRuntimeConfig":{"backend":{"proxyEnabled":true,"flags":{"myAccountPage2016Enabled":true,"catalogGenreFilterSupported":true,"catalogPageLimit":28,"catalogSaleCountVisibleFromDetailsEndpoint":true,"catalogDetailsPageResellerLimit":10,"avatarPageInventoryLimit":10},"baseUrl":"' + $pub + '","apiFormat":"' + $pub + '{1}"}}}'
+          Set-Content -Path "config.json" -Value $cfg
+          Write-Host "frontend baseUrl = $pub"
           npm install --no-audit --no-fund
           npm run build
           Start-Process -FilePath "npm" -ArgumentList "run","start"
           Pop-Location
 
-      - name: Seed ROBLOX + UGC + BadDecisions into user table
+      - name: Seed ROBLOX with Argon2 hash
         shell: powershell
         run: |
-          npm install pg bcryptjs --no-audit --no-fund
+          npm install pg argon2 --no-audit --no-fund
           $seedJs = Join-Path $env:GITHUB_WORKSPACE "seed-admin.js"
           @'
           const { Client } = require("pg");
-          const bcrypt = require("bcryptjs");
+          const argon2 = require("argon2");
           (async () => {
             const raw = process.env.ADMIN_PASSWORD;
             if (!raw) throw new Error("ADMIN_PASSWORD env is empty");
-            const client = new Client({
-              host: "127.0.0.1",
-              user: "postgres",
-              password: "postgres",
-              database: "ecsrev"
-            });
+            const client = new Client({ host: "127.0.0.1", user: "postgres", password: "postgres", database: "ecsrev" });
             await client.connect();
-            const hashed = await bcrypt.hash(raw, 10);
+            const hashed = await argon2.hash(raw, { type: argon2.argon2id });
             const tables = await client.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='user'");
-            if (tables.rowCount === 0) throw new Error("Table user is missing - knex migrate did not run");
-            await client.query(
-              "INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (1, 'ROBLOX', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username, password = EXCLUDED.password",
-              [hashed]
-            );
-            await client.query(
-              "INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (2, 'UGC', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO NOTHING",
-              [hashed]
-            );
-            await client.query(
-              "INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (12, 'BadDecisions', $1, 3, NOW(), NOW()) ON CONFLICT (id) DO NOTHING",
-              [hashed]
-            );
-            await client.query("SELECT setval(pg_get_serial_sequence('user','id'), GREATEST((SELECT MAX(id) FROM \"user\"), 1))");
-            console.log("Seeded ROBLOX (1), UGC (2), BadDecisions (12)");
+            if (tables.rowCount === 0) throw new Error("Table user is missing");
+            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (1, 'ROBLOX', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username, password = EXCLUDED.password", [hashed]);
+            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (2, 'UGC', $1, 1, NOW(), NOW()) ON CONFLICT (id) DO NOTHING", [hashed]);
+            await client.query("INSERT INTO \"user\" (id, username, password, status, created_at, online_at) VALUES (12, 'BadDecisions', $1, 3, NOW(), NOW()) ON CONFLICT (id) DO NOTHING", [hashed]);
+            const check = await client.query("SELECT id, username FROM \"user\" ORDER BY id");
+            console.log("users:", check.rows);
             await client.end();
           })().catch((e) => { console.error(e); process.exit(1); });
           '@ | Set-Content -Path $seedJs -Encoding utf8
@@ -310,81 +291,53 @@ jobs:
           $root = $env:GITHUB_WORKSPACE
           $dataDir = Join-Path $root ".ecsrev-data"
           New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-          $trees = @(
-            @{ From = "services\api\public"; To = "files\api-public" },
-            @{ From = "services\api\storage"; To = "files\api-storage" }
-          )
-          function Save-Tree($fromRel, $toRel) {
-            $from = Join-Path $root $fromRel
-            $to = Join-Path $dataDir $toRel
-            if (Test-Path $from) {
-              New-Item -ItemType Directory -Force -Path $to | Out-Null
-              & robocopy $from $to /MIR /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
-            }
-          }
           function Save-All {
             try {
               & pg_dump -h 127.0.0.1 -U postgres -d ecsrev -Fc -f (Join-Path $dataDir "ecsrev.dump")
               & pg_dump -h 127.0.0.1 -U postgres -d ecsrev -f (Join-Path $dataDir "ecsrev.sql")
-              foreach ($t in $trees) { Save-Tree $t.From $t.To }
+              foreach ($pair in @(@{ From = "services\api\public"; To = "files\api-public" }, @{ From = "services\api\storage"; To = "files\api-storage" })) {
+                $from = Join-Path $root $pair.From
+                $to = Join-Path $dataDir $pair.To
+                if (Test-Path $from) {
+                  New-Item -ItemType Directory -Force -Path $to | Out-Null
+                  & robocopy $from $to /MIR /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+                }
+              }
               Get-Date -Format o | Set-Content (Join-Path $dataDir "last-save.txt")
-              Write-Host "snapshot saved"
-            } catch { Write-Host "snapshot failed" }
+            } catch {}
           }
           Save-All
           while ($true) { Start-Sleep -Seconds 120; Save-All }
           '@ | Set-Content -Path $scriptPath -Encoding ascii
           Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath -WindowStyle Hidden
 
-      - name: Step 7 - AssetValidationService
+      - name: AssetValidationService
         shell: powershell
         working-directory: ./services/AssetValidationServiceV2
         run: |
-          if (Test-Path "main.go") {
-            Start-Process -FilePath "go" -ArgumentList "run","main.go"
-            Write-Host "AssetValidationService started"
-          } else {
-            Write-Host "AssetValidationServiceV2/main.go not found"
-          }
+          if (Test-Path "main.go") { Start-Process -FilePath "go" -ArgumentList "run","main.go" }
 
-      - name: Step 8 - RCCService
+      - name: RCCService
         shell: powershell
         working-directory: ./services/RCCService
         run: |
-          if (Test-Path "RCCService.exe") {
-            Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console","-placeid:1818"
-            Write-Host "RCCService started"
-          } else {
-            Write-Host "RCCService.exe not found"
-          }
+          if (Test-Path "RCCService.exe") { Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console","-placeid:1818" }
 
-      - name: Step 8 - game-server
+      - name: game-server
         shell: powershell
         run: |
           $gs = "services\game-server"
-          if (-not (Test-Path $gs)) { Write-Host "game-server missing"; return }
+          if (-not (Test-Path $gs)) { return }
           $rcc = Join-Path $env:GITHUB_WORKSPACE "services\RCCService\RCCService.exe"
-          $cfg = @"
-          {
-            "rcc": "$($rcc.Replace('\','\\'))",
-            "authorization": "$env:SITE_AUTH",
-            "baseUrl": "http://127.0.0.1:5000",
-            "rccPort": 64989,
-            "port": 3040,
-            "websiteBotAuth": "$env:SITE_AUTH",
-            "thumbnailWebsocketPort": 3189,
-            "dockerDisabled": true
-          }
-          "@
-          Set-Content -Path (Join-Path $gs "config.json") -Value $cfg
+          $pub = $env:PUBLIC_URL
+          Set-Content -Path (Join-Path $gs "config.json") -Value ("{`"rcc`": `"" + $rcc.Replace('\','\\') + "`", `"authorization`": `"$env:SITE_AUTH`", `"baseUrl`": `"$pub`", `"rccPort`": 64989, `"port`": 3040, `"websiteBotAuth`": `"$env:SITE_AUTH`", `"thumbnailWebsocketPort`": 3189, `"dockerDisabled`": true }")
           Push-Location $gs
           npm install --no-audit --no-fund
           npm run build
           Start-Process -FilePath "npm" -ArgumentList "run","start"
           Pop-Location
-          Write-Host "game-server started"
 
-      - name: Step 4 - dotnet run website
+      - name: dotnet run website
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
@@ -392,30 +345,15 @@ jobs:
           Start-Process -FilePath "dotnet" -ArgumentList "run"
           $up = $false
           for ($i = 0; $i -lt 60; $i++) {
-            try {
-              Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null
-              $up = $true
-              break
-            } catch { Start-Sleep -Seconds 3 }
+            try { Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 3 }
           }
-          if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "Website may still be starting" }
+          Write-Host "Open $($env:PUBLIC_URL)"
+          Write-Host "Login ROBLOX + ADMIN_PASSWORD secret"
 
-      - name: Install cloudflared
-        shell: powershell
-        run: choco install cloudflared -y --no-progress
-
-      - name: Persist data artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ecsrev-data
-          path: .ecsrev-data
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Cloudflare tunnel
+      - name: Keep tunnel alive
         shell: powershell
         run: |
-          Write-Host "Watch logs for a trycloudflare.com URL"
-          Write-Host "Login: ROBLOX  /  ADMIN_PASSWORD secret"
-          Write-Host "Admin: /admin   Application auto-accept is ON"
-          cloudflared tunnel --url http://127.0.0.1:5000
+          Write-Host "SITE: $($env:PUBLIC_URL)"
+          Write-Host "Login: ROBLOX / ADMIN_PASSWORD secret"
+          Write-Host "Do not cancel this job or the URL dies"
+          while ($true) { Start-Sleep -Seconds 300; Write-Host "still up $($env:PUBLIC_URL)" }
