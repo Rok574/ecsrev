@@ -1,71 +1,71 @@
-name: Host ECSRev on Windows with Cloudflare
+name: Host ECSRev on Windows with Cloudflare[span_0](start_span)[span_0](end_span)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:[span_1](start_span)[span_1](end_span)
 
 concurrency:
-  group: ecsrev-host
-  cancel-in-progress: true
+  group: ecsrev-host[span_2](start_span)[span_2](end_span)
+  cancel-in-progress: true[span_3](start_span)[span_3](end_span)
 
 jobs:
   host-ecsrev:
-    runs-on: windows-latest
-    timeout-minutes: 360
+    runs-on: windows-latest[span_4](start_span)[span_4](end_span)
+    timeout-minutes: 360[span_5](start_span)[span_5](end_span)
 
     env:
-      PGUSER: postgres
-      PGPASSWORD: postgres
-      PGDATABASE: ecsrev
-      PGHOST: 127.0.0.1
-      DATA_DIR: .ecsrev-data
-      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-      ASPNETCORE_URLS: http://127.0.0.1:5000
-      SITE_AUTH: gha-local-auth
+      PGUSER: postgres[span_6](start_span)[span_6](end_span)
+      PGPASSWORD: postgres[span_7](start_span)[span_7](end_span)
+      PGDATABASE: ecsrev[span_8](start_span)[span_8](end_span)
+      PGHOST: 127.0.0.1[span_9](start_span)[span_9](end_span)
+      DATA_DIR: .ecsrev-data[span_10](start_span)[span_10](end_span)
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}[span_11](start_span)[span_11](end_span)
+      ASPNETCORE_URLS: http://127.0.0.1:5000[span_12](start_span)[span_12](end_span)
+      SITE_AUTH: gha-local-auth[span_13](start_span)[span_13](end_span)
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout Repository[span_14](start_span)[span_14](end_span)
+        uses: actions/checkout@v4[span_15](start_span)[span_15](end_span)
 
-      - name: Require admin password secret
-        shell: powershell
+      - name: Require admin password secret[span_16](start_span)[span_16](end_span)
+        shell: powershell[span_17](start_span)[span_17](end_span)
         run: |
           if ([string]::IsNullOrWhiteSpace($env:ADMIN_PASSWORD)) {
             throw "Add repo secret ADMIN_PASSWORD (Settings > Secrets and variables > Actions)."
           }
-          Write-Host "ADMIN_PASSWORD secret is set."
+          Write-Host "ADMIN_PASSWORD secret is set.[span_18](start_span)"[span_18](end_span)
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET[span_19](start_span)[span_19](end_span)
+        uses: actions/setup-dotnet@v4[span_20](start_span)[span_20](end_span)
         with:
-          dotnet-version: '6.0.x'
+          dotnet-version: '6.0.x[span_21](start_span)'[span_21](end_span)
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js[span_22](start_span)[span_22](end_span)
+        uses: actions/setup-node@v4[span_23](start_span)[span_23](end_span)
         with:
-          node-version: '18'
+          node-version: '18[span_24](start_span)'[span_24](end_span)
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Setup Go[span_25](start_span)[span_25](end_span)
+        uses: actions/setup-go@v5[span_26](start_span)[span_26](end_span)
         with:
-          go-version: '1.18'
+          go-version: '1.18[span_27](start_span)'[span_27](end_span)
 
-      - name: Restore persisted data cache
-        uses: actions/cache@v4
+      - name: Restore persisted data cache[span_28](start_span)[span_28](end_span)
+        uses: actions/cache@v4[span_29](start_span)[span_29](end_span)
         with:
-          path: .ecsrev-data
-          key: ecsrev-data-v1-${{ github.run_id }}
+          path: .ecsrev-data[span_30](start_span)[span_30](end_span)
+          key: ecsrev-data-v1-${{ github.run_id }}[span_31](start_span)[span_31](end_span)
           restore-keys: |
-            ecsrev-data-v1-
+            ecsrev-data-v1-[span_32](start_span)[span_32](end_span)
 
-      - name: Cache PostgreSQL binaries
-        id: pg-cache
-        uses: actions/cache@v4
+      - name: Cache PostgreSQL binaries[span_33](start_span)[span_33](end_span)
+        id: pg-cache[span_34](start_span)[span_34](end_span)
+        uses: actions/cache@v4[span_35](start_span)[span_35](end_span)
         with:
-          path: C:\Program Files\PostgreSQL\15
-          key: postgresql-15.19-win64-v1
+          path: C:\Program Files\PostgreSQL\15[span_36](start_span)[span_36](end_span)
+          key: postgresql-15.19-win64-v1[span_37](start_span)[span_37](end_span)
 
-      - name: Step 1 - folders + restore files
-        shell: powershell
+      - name: Step 1 - folders + restore files[span_38](start_span)[span_38](end_span)
+        shell: powershell[span_39](start_span)[span_39](end_span)
         run: |
           New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
           $dirs = @(
@@ -88,10 +88,10 @@ jobs:
           Restore-Tree "files\api-public" "services\api\public"
           Restore-Tree "files\api-storage" "services\api\storage"
           Restore-Tree "files\uploads" "uploads"
-          Write-Host "Folders ready"
+          Write-Host "Folders ready[span_40](start_span)"[span_40](end_span)
 
-      - name: Step 1 - PostgreSQL
-        shell: powershell
+      - name: Step 1 - PostgreSQL[span_41](start_span)[span_41](end_span)
+        shell: powershell[span_42](start_span)[span_42](end_span)
         run: |
           $pgRoot = "C:\Program Files\PostgreSQL\15"
           $pgBin = Join-Path $pgRoot "bin"
@@ -130,10 +130,10 @@ jobs:
           if (-not $ready) { throw "PostgreSQL did not become ready" }
 
           & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev
-          Write-Host "PostgreSQL ready"
+          Write-Host "PostgreSQL ready[span_43](start_span)"[span_43](end_span)
 
-      - name: Redis
-        shell: powershell
+      - name: Redis[span_44](start_span)[span_44](end_span)
+        shell: powershell[span_45](start_span)[span_45](end_span)
         run: |
           choco install memurai-developer -y --no-progress
           $m = Get-Command memurai.exe -ErrorAction SilentlyContinue
@@ -142,10 +142,10 @@ jobs:
             $r = Get-Command redis-server.exe -ErrorAction SilentlyContinue
             if ($r) { Start-Process $r.Source; Write-Host "redis-server started" }
             else { Write-Host "WARNING: Redis not found" }
-          }
+          }[span_46](start_span)[span_46](end_span)
 
-      - name: Restore database dump if present
-        shell: powershell
+      - name: Restore database dump if present[span_47](start_span)[span_47](end_span)
+        shell: powershell[span_48](start_span)[span_48](end_span)
         run: |
           $dump = Join-Path $env:DATA_DIR "ecsrev.dump"
           $sql  = Join-Path $env:DATA_DIR "ecsrev.sql"
@@ -157,25 +157,25 @@ jobs:
             & psql -h 127.0.0.1 -U postgres -d ecsrev -f $sql
           } else {
             Write-Host "No previous dump - fresh database"
-          }
+          }[span_49](start_span)[span_49](end_span)
 
-      - name: Step 1 - services/api/config.json
-        shell: powershell
-        working-directory: ./services/api
+      - name: Step 1 - services/api/config.json[span_50](start_span)[span_50](end_span)
+        shell: powershell[span_51](start_span)[span_51](end_span)
+        working-directory: ./services/api[span_52](start_span)[span_52](end_span)
         run: |
-          Set-Content -Path "config.json" -Value '{"knex":{"client":"pg","connection":{"host":"127.0.0.1","user":"postgres","password":"postgres","database":"ecsrev"}}}'
+          Set-Content -Path "config.json" -Value '{"knex":{"client":"pg","connection":{"host":"127.0.0.1","user":"postgres","password":"postgres","database":"ecsrev"}}}[span_53](start_span)'[span_53](end_span)
 
-      - name: Step 2 - npm i + knex migrate
-        shell: powershell
-        working-directory: ./services/api
+      - name: Step 2 - npm i + knex migrate[span_54](start_span)[span_54](end_span)
+        shell: powershell[span_55](start_span)[span_55](end_span)
+        working-directory: ./services/api[span_56](start_span)[span_56](end_span)
         run: |
           npm install --no-audit --no-fund
           npx knex migrate:latest
-          & psql -h 127.0.0.1 -U postgres -d ecsrev -c "\dt"
+          & psql -h 127.0.0.1 -U postgres -d ecsrev -c "\dt[span_57](start_span)"[span_57](end_span)
 
-      - name: Step 3 - appsettings.json from official example
-        shell: powershell
-        working-directory: ./services/Roblox/Roblox.Website
+      - name: Step 3 - appsettings.json from official example[span_58](start_span)[span_58](end_span)
+        shell: powershell[span_59](start_span)[span_59](end_span)
+        working-directory: ./services/Roblox/Roblox.Website[span_60](start_span)[span_60](end_span)
         run: |
           $root = $env:GITHUB_WORKSPACE.Replace('\','\\')
           @"
@@ -219,10 +219,10 @@ jobs:
             "AllowedHosts": "*"
           }
           "@ | Set-Content -Path "appsettings.json"
-          Write-Host "appsettings.json written with Windows paths"
+          Write-Host "appsettings.json written with Windows paths[span_61](start_span)"[span_61](end_span)
 
-      - name: Auto-accept applications (docs step 6)
-        shell: powershell
+      - name: Auto-accept applications (docs step 6)[span_62](start_span)[span_62](end_span)
+        shell: powershell[span_63](start_span)[span_63](end_span)
         run: |
           $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
@@ -235,17 +235,17 @@ jobs:
             Write-Host "Patched ApplicationProcessorService.cs"
           } else {
             Write-Host "ApplicationProcessorService.cs not found"
-          }
+          }[span_64](start_span)[span_64](end_span)
 
-      - name: Step 5 - build admin panel
-        shell: powershell
-        working-directory: ./services/admin
+      - name: Step 5 - build admin panel[span_65](start_span)[span_65](end_span)
+        shell: powershell[span_66](start_span)[span_66](end_span)
+        working-directory: ./services/admin[span_67](start_span)[span_67](end_span)
         run: |
           npm install --no-audit --no-fund
-          npm run build
+          npm run build[span_68](start_span)[span_68](end_span)
 
-      - name: Step 6 - build frontend (2016-roblox-main)
-        shell: powershell
+      - name: Step 6 - build frontend (2016-roblox-main)[span_69](start_span)[span_69](end_span)
+        shell: powershell[span_70](start_span)[span_70](end_span)
         run: |
           $front = $null
           foreach ($c in @(
@@ -261,13 +261,21 @@ jobs:
           }
           Write-Host "Building frontend in $front"
           Push-Location $front
+          if (-not (Test-Path "config.json")) {
+            if (Test-Path "util\create_config.js") {
+              node .\util\create_config.js
+            }
+          }
+          if (-not (Test-Path "config.json")) {
+            Set-Content -Path "config.json" -Value '{"serverRuntimeConfig":{"backend":{"csrfKey":"gha-frontend-csrf-key"}},"publicRuntimeConfig":{"backend":{"proxyEnabled":true,"flags":{"myAccountPage2016Enabled":true,"catalogGenreFilterSupported":true,"catalogPageLimit":28,"catalogSaleCountVisibleFromDetailsEndpoint":true,"catalogDetailsPageResellerLimit":10,"avatarPageInventoryLimit":10},"baseUrl":"http://127.0.0.1:5000","apiFormat":"http://127.0.0.1:5000{1}"}}}'
+          }
           npm install --no-audit --no-fund
           npm run build
           Start-Process -FilePath "npm" -ArgumentList "run","start"
-          Pop-Location
+          Pop-Location[span_71](start_span)[span_71](end_span)
 
-      - name: Seed ROBLOX + UGC + BadDecisions into user table
-        shell: powershell
+      - name: Seed ROBLOX + UGC + BadDecisions into user table[span_72](start_span)[span_72](end_span)
+        shell: powershell[span_73](start_span)[span_73](end_span)
         run: |
           npm install pg bcryptjs --no-audit --no-fund
           $seedJs = Join-Path $env:GITHUB_WORKSPACE "seed-admin.js"
@@ -304,10 +312,10 @@ jobs:
             await client.end();
           })().catch((e) => { console.error(e); process.exit(1); });
           '@ | Set-Content -Path $seedJs -Encoding utf8
-          node $seedJs
+          node $seedJs[span_74](start_span)[span_74](end_span)
 
-      - name: Start background data saver
-        shell: powershell
+      - name: Start background data saver[span_75](start_span)[span_75](end_span)
+        shell: powershell[span_76](start_span)[span_76](end_span)
         run: |
           $scriptPath = Join-Path $env:RUNNER_TEMP "save-data.ps1"
           @'
@@ -339,32 +347,32 @@ jobs:
           Save-All
           while ($true) { Start-Sleep -Seconds 120; Save-All }
           '@ | Set-Content -Path $scriptPath -Encoding ascii
-          Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath -WindowStyle Hidden
+          Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath -WindowStyle Hidden[span_77](start_span)[span_77](end_span)
 
-      - name: Step 7 - AssetValidationService
-        shell: powershell
-        working-directory: ./services/AssetValidationServiceV2
+      - name: Step 7 - AssetValidationService[span_78](start_span)[span_78](end_span)
+        shell: powershell[span_79](start_span)[span_79](end_span)
+        working-directory: ./services/AssetValidationServiceV2[span_80](start_span)[span_80](end_span)
         run: |
           if (Test-Path "main.go") {
             Start-Process -FilePath "go" -ArgumentList "run","main.go"
             Write-Host "AssetValidationService started"
           } else {
             Write-Host "AssetValidationServiceV2/main.go not found"
-          }
+          }[span_81](start_span)[span_81](end_span)
 
-      - name: Step 8 - RCCService
-        shell: powershell
-        working-directory: ./services/RCCService
+      - name: Step 8 - RCCService[span_82](start_span)[span_82](end_span)
+        shell: powershell[span_83](start_span)[span_83](end_span)
+        working-directory: ./services/RCCService[span_84](start_span)[span_84](end_span)
         run: |
           if (Test-Path "RCCService.exe") {
             Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console","-placeid:1818"
             Write-Host "RCCService started"
           } else {
             Write-Host "RCCService.exe not found"
-          }
+          }[span_85](start_span)[span_85](end_span)
 
-      - name: Step 8 - game-server
-        shell: powershell
+      - name: Step 8 - game-server[span_86](start_span)[span_86](end_span)
+        shell: powershell[span_87](start_span)[span_87](end_span)
         run: |
           $gs = "services\game-server"
           if (-not (Test-Path $gs)) { Write-Host "game-server missing"; return }
@@ -387,11 +395,11 @@ jobs:
           npm run build
           Start-Process -FilePath "npm" -ArgumentList "run","start"
           Pop-Location
-          Write-Host "game-server started"
+          Write-Host "game-server started[span_88](start_span)"[span_88](end_span)
 
-      - name: Step 4 - dotnet run website
-        shell: powershell
-        working-directory: ./services/Roblox/Roblox.Website
+      - name: Step 4 - dotnet run website[span_89](start_span)[span_89](end_span)
+        shell: powershell[span_90](start_span)[span_90](end_span)
+        working-directory: ./services/Roblox/Roblox.Website[span_91](start_span)[span_91](end_span)
         run: |
           $env:ASPNETCORE_URLS = "http://127.0.0.1:5000"
           Start-Process -FilePath "dotnet" -ArgumentList "run"
@@ -403,24 +411,24 @@ jobs:
               break
             } catch { Start-Sleep -Seconds 3 }
           }
-          if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "Website may still be starting" }
+          if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "Website may still be starting" }[span_92](start_span)[span_92](end_span)
 
-      - name: Install cloudflared
-        shell: powershell
-        run: choco install cloudflared -y --no-progress
+      - name: Install cloudflared[span_93](start_span)[span_93](end_span)
+        shell: powershell[span_94](start_span)[span_94](end_span)
+        run: choco install cloudflared -y --no-progress[span_95](start_span)[span_95](end_span)
 
-      - name: Persist data artifact
-        uses: actions/upload-artifact@v4
+      - name: Persist data artifact[span_96](start_span)[span_96](end_span)
+        uses: actions/upload-artifact@v4[span_97](start_span)[span_97](end_span)
         with:
-          name: ecsrev-data
-          path: .ecsrev-data
-          if-no-files-found: ignore
-          retention-days: 14
+          name: ecsrev-data[span_98](start_span)[span_98](end_span)
+          path: .ecsrev-data[span_99](start_span)[span_99](end_span)
+          if-no-files-found: ignore[span_100](start_span)[span_100](end_span)
+          retention-days: 14[span_101](start_span)[span_101](end_span)
 
-      - name: Cloudflare tunnel
-        shell: powershell
+      - name: Cloudflare tunnel[span_102](start_span)[span_102](end_span)
+        shell: powershell[span_103](start_span)[span_103](end_span)
         run: |
           Write-Host "Watch logs for a trycloudflare.com URL"
           Write-Host "Login: ROBLOX  /  ADMIN_PASSWORD secret"
           Write-Host "Admin: /admin   Application auto-accept is ON"
-          cloudflared tunnel --url http://127.0.0.1:5000
+          cloudflared tunnel --url http://127.0.0.1:5000[span_104](start_span)[span_104](end_span)
