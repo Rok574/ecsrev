@@ -1,0 +1,186 @@
+name: Host ECSRev on Windows with Cloudflare
+
+on:
+  workflow_dispatch:
+
+jobs:
+  host-ecsrev:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.18'
+
+      - name: Install and Start PostgreSQL on Windows
+        shell: powershell
+        run: |
+          choco install postgresql15 --params '/Password:postgres' -y
+          $env:Path += ";C:\Program Files\PostgreSQL\15\bin"
+          echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
+          
+          # Wait for PostgreSQL service to start
+          Start-Sleep -Seconds 5
+          & "C:\Program Files\PostgreSQL\15\bin\createdb.exe" -U postgres -h localhost ecsrev
+        env:
+          PGPASSWORD: postgres
+
+      - name: Create Required Directories
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "services\api\public\images\thumbnails"
+          New-Item -ItemType Directory -Force -Path "services\api\public\UnsecuredContent"
+
+      - name: Configure API Config
+        shell: powershell
+        working-directory: ./services/api
+        run: |
+          Set-Content -Path "config.json" -Value '{ "knex": { "client": "pg", "connection": { "host": "127.0.0.1", "user": "postgres", "password": "postgres", "database": "ecsrev" } } }'
+
+      - name: Run API Migrations
+        shell: powershell
+        working-directory: ./services/api
+        run: |
+          npm install
+          npx knex migrate:latest
+
+      - name: Configure Appsettings
+        shell: powershell
+        working-directory: ./services/Roblox/Roblox.Website
+        run: |
+          $appsettings = @'
+          {
+            "Logging": {
+              "LogLevel": {
+                "Default": "Information",
+                "Microsoft.AspNetCore": "Warning"
+              }
+            },
+            "AllowedHosts": "*",
+            "ConnectionStrings": {
+              "DefaultConnection": "Host=127.0.0.1;Database=ecsrev;Username=postgres;Password=postgres"
+            },
+            "OwnerUserId": 1
+          }
+          '@
+          Set-Content -Path "appsettings.json" -Value $appsettings
+
+      - name: Enable Auto-Accept in ApplicationProcessorService
+        shell: powershell
+        run: |
+          $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
+          if (Test-Path $file) {
+            (Get-Content $file) -replace 'false', 'true' \vert{} Set-Content$file
+            Write-Host "Successfully patched ApplicationProcessorService.cs"
+          }
+
+      - name: Build Admin Panel
+        shell: powershell
+        working-directory: ./services/admin
+        run: |
+          npm install
+          npm run build
+
+      - name: Seed Admin User (Skylight) with BCrypt Password
+        shell: powershell
+        run: |
+          npm install pg bcryptjs
+          node -e '
+            const { Client } = require("pg");
+            const bcrypt = require("bcryptjs");
+
+            async function seed() {
+              const client = new Client({
+                host: "127.0.0.1",
+                user: "postgres",
+                password: "postgres",
+                database: "ecsrev"
+              });
+              await client.connect();
+
+              const rawPassword = "austin00op99";
+              const hashedPassword = await bcrypt.hash(rawPassword, 10);
+
+              console.log("Seeding system accounts and Skylight...");
+
+              try {
+                // Insert user Skylight with BCrypt hashed password
+                await client.query(`
+                  INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
+                  VALUES (1, '\''Skylight'\'', $1, true, NOW(), NOW())
+                  ON CONFLICT (id) DO UPDATE SET username = '\''Skylight'\'', password = $1, is_admin = true;
+                `, [hashedPassword]);
+
+                // Insert required system account UGC
+                await client.query(`
+                  INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
+                  VALUES (2, '\''UGC'\'', NULL, false, NOW(), NOW())
+                  ON CONFLICT (id) DO NOTHING;
+                `);
+
+                // Insert required system account BadDecisions
+                await client.query(`
+                  INSERT INTO "Users" (id, username, password, is_admin, is_banned, created_at, updated_at) 
+                  VALUES (12, '\''BadDecisions'\'', '\''banned'\'', false, true, NOW(), NOW())
+                  ON CONFLICT (id) DO NOTHING;
+                `);
+
+                console.log("Successfully seeded Skylight (Admin), UGC, and BadDecisions!");
+              } catch (err) {
+                console.error("Seeding error:", err.message);
+              } finally {
+                await client.end();
+              }
+            }
+            seed();
+          '
+
+      - name: Start Native RCCService
+        shell: powershell
+        working-directory: ./services/RCCService
+        run: |
+          if (Test-Path "RCCService.exe") {
+            Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console", "-placeid:1818"
+            Write-Host "RCCService started successfully."
+          } else {
+            Write-Host "RCCService.exe not found, skipping..."
+          }
+
+      - name: Start Asset Validation Service (Go)
+        shell: powershell
+        working-directory: ./services/AssetValidationServiceV2
+        run: |
+          Start-Process -FilePath "go" -ArgumentList "run", "main.go"
+
+      - name: Start .NET Website
+        shell: powershell
+        working-directory: ./services/Roblox/Roblox.Website
+        run: |
+          Start-Process -FilePath "dotnet" -ArgumentList "run"
+          Start-Sleep -Seconds 10
+
+      - name: Install and Run Cloudflared Tunnel
+        shell: powershell
+        run: |
+          choco install cloudflared -y
+          Write-Host "===================================================="
+          Write-Host "Your ECSRev site is starting up!"
+          Write-Host "Look for the public *.trycloudflare.com URL below:"
+          Write-Host "===================================================="
+          
+          # Run cloudflared tunnel pointing to website on localhost:5000
+          cloudflared tunnel --url http://localhost:5000
