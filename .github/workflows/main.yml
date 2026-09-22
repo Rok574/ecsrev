@@ -19,6 +19,7 @@ jobs:
       PGHOST: 127.0.0.1
       DATA_DIR: .ecsrev-data
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      ASPNETCORE_URLS: http://127.0.0.1:5000
 
     steps:
       - name: Checkout Repository
@@ -36,28 +37,16 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '6.0.x'
-          cache: true
-          cache-dependency-path: |
-            services/Roblox/**/*.csproj
-            services/Roblox/**/packages.lock.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: npm
-          cache-dependency-path: |
-            services/api/package-lock.json
-            services/admin/package-lock.json
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.18'
-          cache: true
-          cache-dependency-path: |
-            services/AssetValidationServiceV2/go.sum
-            services/AssetValidationServiceV2/go.mod
 
       - name: Restore persisted data cache
         id: data-cache
@@ -93,7 +82,7 @@ jobs:
             if (Test-Path $from) {
               New-Item -ItemType Directory -Force -Path $toRel | Out-Null
               Write-Host "Restoring $fromRel -> $toRel"
-              robocopy $from $toRel /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+              & robocopy $from $toRel /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
             }
           }
 
@@ -103,8 +92,8 @@ jobs:
           Restore-Tree "files\uploads" "uploads"
 
           if (Test-Path "$env:DATA_DIR\public") {
-            Write-Host "Restoring legacy public/ snapshot"
-            robocopy "$env:DATA_DIR\public" "services\api\public" /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+            Write-Host "Restoring legacy public snapshot"
+            & robocopy "$env:DATA_DIR\public" "services\api\public" /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
           }
 
           Write-Host "File restore done"
@@ -112,14 +101,14 @@ jobs:
       - name: Install PostgreSQL
         shell: powershell
         run: |
-          choco install postgresql15 --params '/Password:postgres' -y --no-progress
+          choco install postgresql15 --params "/Password:postgres" -y --no-progress
           $pgBin = "C:\Program Files\PostgreSQL\15\bin"
-          echo $pgBin >> $env:GITHUB_PATH
-          $env:Path = "$pgBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $pgBin
+          $env:Path = "$pgBin;" + $env:Path
 
           $svc = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($svc) {
-            if ($svc.Status -ne 'Running') { Start-Service $svc.Name }
+          if ($svc -and $svc.Status -ne "Running") {
+            Start-Service $svc.Name
           }
 
           $ready = $false
@@ -130,7 +119,10 @@ jobs:
           }
           if (-not $ready) { throw "PostgreSQL did not become ready" }
 
-          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
+          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "createdb returned $LASTEXITCODE (database may already exist)"
+          }
           Write-Host "PostgreSQL ready"
 
       - name: Restore database dump if present
@@ -141,11 +133,13 @@ jobs:
           if (Test-Path $dump) {
             Write-Host "Restoring custom dump..."
             & pg_restore -h 127.0.0.1 -U postgres -d ecsrev --clean --if-exists --no-owner --no-acl $dump
+            Write-Host "pg_restore exit code: $LASTEXITCODE"
           } elseif (Test-Path $sql) {
             Write-Host "Restoring SQL dump..."
             & psql -h 127.0.0.1 -U postgres -d ecsrev -f $sql
+            Write-Host "psql exit code: $LASTEXITCODE"
           } else {
-            Write-Host "No previous dump found — fresh database"
+            Write-Host "No previous dump found - fresh database"
           }
 
       - name: Configure API
@@ -158,14 +152,14 @@ jobs:
         shell: powershell
         working-directory: ./services/api
         run: |
-          if (Test-Path package-lock.json) { npm ci --prefer-offline --no-audit --no-fund } else { npm install --no-audit --no-fund }
+          npm install --no-audit --no-fund
           npx knex migrate:latest
 
       - name: Configure Website appsettings
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
-          @'
+          $appsettings = @'
           {
             "Logging": { "LogLevel": { "Default": "Information", "Microsoft.AspNetCore": "Warning" } },
             "AllowedHosts": "*",
@@ -174,7 +168,8 @@ jobs:
             },
             "OwnerUserId": 1
           }
-          '@ | Set-Content -Path "appsettings.json"
+          '@
+          Set-Content -Path "appsettings.json" -Value $appsettings
 
       - name: Enable Auto-Accept in ApplicationProcessorService
         shell: powershell
@@ -182,9 +177,9 @@ jobs:
           $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
             $content = Get-Content $file -Raw
-            $patched = $content -replace 'autoAccept\s*=\s*false', 'autoAccept = true'
+            $patched = $content -replace "autoAccept\s*=\s*false", "autoAccept = true"
             if ($patched -eq $content) {
-              $patched = $content -replace 'AutoAccept\s*=\s*false', 'AutoAccept = true'
+              $patched = $content -replace "AutoAccept\s*=\s*false", "AutoAccept = true"
             }
             Set-Content -Path $file -Value $patched -NoNewline
             Write-Host "Patched ApplicationProcessorService.cs"
@@ -196,38 +191,52 @@ jobs:
         shell: powershell
         working-directory: ./services/admin
         run: |
-          if (Test-Path package-lock.json) { npm ci --prefer-offline --no-audit --no-fund } else { npm install --no-audit --no-fund }
+          npm install --no-audit --no-fund
           npm run build
 
       - name: Seed admin only if missing
         shell: powershell
         run: |
           npm install pg bcryptjs --no-audit --no-fund
-          node -e "
-            const { Client } = require('pg');
-            const bcrypt = require('bcryptjs');
-            (async () => {
-              const raw = process.env.ADMIN_PASSWORD;
-              if (!raw) throw new Error('ADMIN_PASSWORD env is empty');
-              const client = new Client({ host: '127.0.0.1', user: 'postgres', password: 'postgres', database: 'ecsrev' });
-              await client.connect();
-              const hashed = await bcrypt.hash(raw, 10);
-              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at)
-                VALUES (1, 'Skylight', \$1, true, NOW(), NOW())
-                ON CONFLICT (id) DO UPDATE SET username = 'Skylight', password = \$1, is_admin = true\`, [hashed]);
-              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at)
-                VALUES (2, 'UGC', NULL, false, NOW(), NOW()) ON CONFLICT (id) DO NOTHING\`);
-              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, is_banned, created_at, updated_at)
-                VALUES (12, 'BadDecisions', 'banned', false, true, NOW(), NOW()) ON CONFLICT (id) DO NOTHING\`);
-              console.log('Seed complete');
-              await client.end();
-            })().catch(e => { console.error(e); process.exit(1); });
-          "
+          $seedJs = Join-Path $env:RUNNER_TEMP "seed-admin.js"
+          @'
+          const { Client } = require("pg");
+          const bcrypt = require("bcryptjs");
+          (async () => {
+            const raw = process.env.ADMIN_PASSWORD;
+            if (!raw) throw new Error("ADMIN_PASSWORD env is empty");
+            const client = new Client({
+              host: "127.0.0.1",
+              user: "postgres",
+              password: "postgres",
+              database: "ecsrev"
+            });
+            await client.connect();
+            const hashed = await bcrypt.hash(raw, 10);
+            await client.query(
+              "INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at) VALUES (1, 'Skylight', $1, true, NOW(), NOW()) ON CONFLICT (id) DO UPDATE SET username = 'Skylight', password = $1, is_admin = true",
+              [hashed]
+            );
+            await client.query(
+              "INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at) VALUES (2, 'UGC', NULL, false, NOW(), NOW()) ON CONFLICT (id) DO NOTHING"
+            );
+            await client.query(
+              "INSERT INTO \"Users\" (id, username, password, is_admin, is_banned, created_at, updated_at) VALUES (12, 'BadDecisions', 'banned', false, true, NOW(), NOW()) ON CONFLICT (id) DO NOTHING"
+            );
+            console.log("Seed complete");
+            await client.end();
+          })().catch((e) => {
+            console.error(e);
+            process.exit(1);
+          });
+          '@ | Set-Content -Path $seedJs -Encoding utf8
+          node $seedJs
 
       - name: Start background data saver
         shell: powershell
         run: |
-          $saver = @'
+          $scriptPath = Join-Path $env:RUNNER_TEMP "save-data.ps1"
+          @'
           $ErrorActionPreference = "Continue"
           $root = $env:GITHUB_WORKSPACE
           $dataDir = Join-Path $root ".ecsrev-data"
@@ -245,7 +254,7 @@ jobs:
             $to = Join-Path $dataDir $toRel
             if (Test-Path $from) {
               New-Item -ItemType Directory -Force -Path $to | Out-Null
-              robocopy $from $to /MIR /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+              & robocopy $from $to /MIR /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
             }
           }
 
@@ -255,9 +264,9 @@ jobs:
               & pg_dump -h 127.0.0.1 -U postgres -d ecsrev -f (Join-Path $dataDir "ecsrev.sql")
               foreach ($t in $trees) { Save-Tree $t.From $t.To }
               Get-Date -Format o | Set-Content (Join-Path $dataDir "last-save.txt")
-              Write-Host "DB + images/files snapshot saved at $(Get-Date)"
+              Write-Host "DB + images/files snapshot saved"
             } catch {
-              Write-Host "Snapshot failed: $_"
+              Write-Host "Snapshot failed"
             }
           }
           Save-All
@@ -265,10 +274,8 @@ jobs:
             Start-Sleep -Seconds 120
             Save-All
           }
-          '@
-          $scriptPath = Join-Path $env:RUNNER_TEMP "save-data.ps1"
-          Set-Content -Path $scriptPath -Value $saver
-          Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WindowStyle Hidden
+          '@ | Set-Content -Path $scriptPath -Encoding ascii
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath -WindowStyle Hidden
           Write-Host "Background saver started (every 2 minutes)"
 
       - name: Start Native RCCService
@@ -297,14 +304,17 @@ jobs:
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
-          Start-Process -FilePath "dotnet" -ArgumentList "run","--no-restore"
+          $env:ASPNETCORE_URLS = "http://127.0.0.1:5000"
+          Start-Process -FilePath "dotnet" -ArgumentList "run"
           $up = $false
-          for ($i = 0; $i -lt 30; $i++) {
+          for ($i = 0; $i -lt 45; $i++) {
             try {
-              $r = Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2
+              Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2 | Out-Null
               $up = $true
               break
-            } catch { Start-Sleep -Seconds 2 }
+            } catch {
+              Start-Sleep -Seconds 2
+            }
           }
           if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "Website may still be starting..." }
 
@@ -323,9 +333,6 @@ jobs:
       - name: Run Cloudflared Tunnel
         shell: powershell
         run: |
-          Write-Host "===================================================="
-          Write-Host "ECSRev is starting. Watch for *.trycloudflare.com"
+          Write-Host "ECSRev is starting. Watch for a trycloudflare.com URL"
           Write-Host "Data snapshots every 2 minutes into .ecsrev-data"
-          Write-Host "Cancel the job to stop. Next run restores the cache."
-          Write-Host "===================================================="
-          cloudflared tunnel --url http://localhost:5000
+          cloudflared tunnel --url http://127.0.0.1:5000
