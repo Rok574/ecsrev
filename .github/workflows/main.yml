@@ -26,18 +26,17 @@ jobs:
         with:
           go-version: '1.18'
 
-      - name: Start Fast PostgreSQL in Docker
+      - name: Install and Start PostgreSQL Service
         shell: powershell
         run: |
-          docker run -d `
-            --name postgres `
-            -p 5432:5432 `
-            -e POSTGRES_USER=postgres `
-            -e POSTGRES_PASSWORD=postgres `
-            -e POSTGRES_DB=ecsrev `
-            postgres:15-alpine
+          choco install postgresql15 --params '/Password:postgres' -y --no-progress
+          $env:Path += ";C:\Program Files\PostgreSQL\15\bin"
+          echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
           
           Start-Sleep -Seconds 5
+          & "C:\Program Files\PostgreSQL\15\bin\createdb.exe" -U postgres -h localhost ecsrev
+        env:
+          PGPASSWORD: postgres
 
       - name: Create Required Directories
         shell: powershell
