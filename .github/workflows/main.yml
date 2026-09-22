@@ -62,7 +62,7 @@ jobs:
         id: pg-cache
         uses: actions/cache@v4
         with:
-          path: C:\\Program Files\\PostgreSQL\\15
+          path: C:\Program Files\PostgreSQL\15
           key: postgresql-15.19-win64-v1
 
       - name: Folders + restore files
@@ -70,11 +70,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
           foreach ($d in @(
-            "services\\api\\public",
-            "services\\api\\public\\images\\thumbnails",
-            "services\\api\\public\\images\\groups",
-            "services\\api\\public\\UnsecuredContent",
-            "services\\api\\storage\\asset"
+            "services\api\public",
+            "services\api\public\images\thumbnails",
+            "services\api\public\images\groups",
+            "services\api\public\UnsecuredContent",
+            "services\api\storage\asset"
           )) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
           function Restore-Tree($fromRel, $toRel) {
             $from = Join-Path $env:DATA_DIR $fromRel
@@ -83,13 +83,13 @@ jobs:
               & robocopy $from $toRel /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
             }
           }
-          Restore-Tree "files\\api-public" "services\\api\\public"
-          Restore-Tree "files\\api-storage" "services\\api\\storage"
+          Restore-Tree "files\api-public" "services\api\public"
+          Restore-Tree "files\api-storage" "services\api\storage"
 
       - name: PostgreSQL
         shell: powershell
         run: |
-          $pgRoot = "C:\\Program Files\\PostgreSQL\\15"
+          $pgRoot = "C:\Program Files\PostgreSQL\15"
           $pgBin = Join-Path $pgRoot "bin"
           $pgData = Join-Path $pgRoot "data"
           if ("${{ steps.pg-cache.outputs.cache-hit }}" -ne "true") {
@@ -102,17 +102,17 @@ jobs:
           if ($svc) {
             if ($svc.Status -ne "Running") { Start-Service $svc.Name }
           } else {
-            if (-not (Test-Path $pgData)) { & "$pgBin\\initdb.exe" -D $pgData -U postgres --auth=trust --encoding=UTF8 }
-            & "$pgBin\\pg_ctl.exe" -D $pgData -l (Join-Path $pgRoot "pg.log") start
+            if (-not (Test-Path $pgData)) { & "$pgBin\initdb.exe" -D $pgData -U postgres --auth=trust --encoding=UTF8 }
+            & "$pgBin\pg_ctl.exe" -D $pgData -l (Join-Path $pgRoot "pg.log") start
           }
           $ready = $false
           for ($i = 0; $i -lt 40; $i++) {
-            & "$pgBin\\pg_isready.exe" -h 127.0.0.1 -U postgres | Out-Null
+            & "$pgBin\pg_isready.exe" -h 127.0.0.1 -U postgres | Out-Null
             if ($LASTEXITCODE -eq 0) { $ready = $true; break }
             Start-Sleep -Seconds 2
           }
           if (-not $ready) { throw "PostgreSQL did not become ready" }
-          & "$pgBin\\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
+          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
 
       - name: Redis
         shell: powershell
@@ -197,11 +197,11 @@ jobs:
       - name: Auto-accept applications
         shell: powershell
         run: |
-          $file = "services\\Roblox\\Roblox.Services\\Users\\ApplicationProcessorService.cs"
+          $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
             $content = Get-Content $file -Raw
-            $patched = $content -replace "autoAccept\\s*=\\s*false", "autoAccept = true"
-            if ($patched -eq $content) { $patched = $content -replace "AutoAccept\\s*=\\s*false", "AutoAccept = true" }
+            $patched = $content -replace "autoAccept\s*=\s*false", "autoAccept = true"
+            if ($patched -eq $content) { $patched = $content -replace "AutoAccept\s*=\s*false", "AutoAccept = true" }
             Set-Content -Path $file -Value $patched -NoNewline
           }
 
@@ -228,7 +228,6 @@ jobs:
           const getFullUrl = (apiSite, fullUrl) => getBaseUrl() + fullUrl;
           const getUrlWithProxy = (url) => url;
           const request = async (method, url, data) => {
-            const isBrowser = typeof window !== 'undefined';
             try {
               let headers = { 'x-csrf-token': _csrf };
               return await axios.request({ method, url: getUrlWithProxy(url), data, headers, maxRedirects: 0 });
@@ -243,16 +242,22 @@ jobs:
           export default request;
           export { getFullUrl, getBaseUrl, getUrlWithProxy };
           "@
-          Set-Content -Path "lib\\request.js" -Value $js
+          Set-Content -Path "lib\request.js" -Value $js
           npm install --no-audit --no-fund
           npm run build
-          $log = Join-Path $env:RUNNER_TEMP "next-start.log"
-          Start-Process -FilePath "npm" -ArgumentList "run","start","--","-p","3000" -WorkingDirectory (Get-Location).Path -RedirectStandardOutput $log -RedirectStandardError $log
+          $logOut = Join-Path $env:RUNNER_TEMP "next-start.out.log"
+          $logErr = Join-Path $env:RUNNER_TEMP "next-start.err.log"
+          Start-Process -FilePath "npm" -ArgumentList "run","start","--","-p","3000" -WorkingDirectory (Get-Location).Path -RedirectStandardOutput $logOut -RedirectStandardError $logErr
           $up = $false
           for ($i = 0; $i -lt 40; $i++) {
             try { Invoke-WebRequest -Uri "http://127.0.0.1:3000" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 3 }
           }
-          if ($up) { Write-Host "Next.js is up on :3000" } else { if (Test-Path $log) { Get-Content $log }; throw "2016 frontend is not running" }
+          if ($up) { Write-Host "Next.js is up on :3000" }
+          else {
+            if (Test-Path $logOut) { Get-Content $logOut }
+            if (Test-Path $logErr) { Get-Content $logErr }
+            throw "2016 frontend is not running"
+          }
 
       - name: Start background data saver
         shell: powershell
@@ -284,14 +289,14 @@ jobs:
         shell: powershell
         working-directory: ./services/RCCService
         run: |
-          if (Test-Path "RCCService.exe") { Start-Process -FilePath ".\\RCCService.exe" -ArgumentList "-console","-placeid:1818" }
+          if (Test-Path "RCCService.exe") { Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console","-placeid:1818" }
 
       - name: game-server
         shell: powershell
         run: |
-          $gs = "services\\game-server"
+          $gs = "services\game-server"
           if (-not (Test-Path $gs)) { return }
-          $rcc = Join-Path $env:GITHUB_WORKSPACE "services\\RCCService\\RCCService.exe"
+          $rcc = Join-Path $env:GITHUB_WORKSPACE "services\RCCService\RCCService.exe"
           Set-Content -Path (Join-Path $gs "config.json") -Value ('{"rcc":"' + $rcc.Replace('\','\\') + '","authorization":"' + $env:SITE_AUTH + '","baseUrl":"http://127.0.0.1:5000","rccPort":64989,"port":3040,"websiteBotAuth":"' + $env:SITE_AUTH + '","thumbnailWebsocketPort":3189,"dockerDisabled":true}')
           Push-Location $gs
           npm install --no-audit --no-fund
