@@ -3,89 +3,191 @@ name: Host ECSRev on Windows with Cloudflare
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ecsrev-host
+  cancel-in-progress: true
+
 jobs:
   host-ecsrev:
     runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: ecsrev
+      PGHOST: 127.0.0.1
+      DATA_DIR: .ecsrev-data
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET Core
+      - name: Require admin password secret
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ADMIN_PASSWORD)) {
+            throw "Secret ADMIN_PASSWORD is missing. Add it under Repo Settings > Secrets and variables > Actions."
+          }
+          Write-Host "ADMIN_PASSWORD secret is set."
+
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '6.0.x'
+          cache: true
+          cache-dependency-path: |
+            services/Roblox/**/*.csproj
+            services/Roblox/**/packages.lock.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: npm
+          cache-dependency-path: |
+            services/api/package-lock.json
+            services/admin/package-lock.json
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.18'
+          cache: true
+          cache-dependency-path: |
+            services/AssetValidationServiceV2/go.sum
+            services/AssetValidationServiceV2/go.mod
 
-      - name: Install and Start PostgreSQL Service
+      - name: Restore persisted data cache
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: .ecsrev-data
+          key: ecsrev-data-v1-${{ github.run_id }}
+          restore-keys: |
+            ecsrev-data-v1-
+
+      - name: Create required directories and restore files
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
+
+          $dirs = @(
+            "services\api\public",
+            "services\api\public\images",
+            "services\api\public\images\thumbnails",
+            "services\api\public\UnsecuredContent",
+            "services\api\public\assets",
+            "services\Roblox\Roblox.Website\wwwroot",
+            "services\Roblox\Roblox.Website\wwwroot\images",
+            "storage",
+            "uploads"
+          )
+          foreach ($d in $dirs) {
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+          }
+
+          function Restore-Tree($fromRel, $toRel) {
+            $from = Join-Path $env:DATA_DIR $fromRel
+            if (Test-Path $from) {
+              New-Item -ItemType Directory -Force -Path $toRel | Out-Null
+              Write-Host "Restoring $fromRel -> $toRel"
+              robocopy $from $toRel /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+            }
+          }
+
+          Restore-Tree "files\api-public" "services\api\public"
+          Restore-Tree "files\wwwroot" "services\Roblox\Roblox.Website\wwwroot"
+          Restore-Tree "files\storage" "storage"
+          Restore-Tree "files\uploads" "uploads"
+
+          if (Test-Path "$env:DATA_DIR\public") {
+            Write-Host "Restoring legacy public/ snapshot"
+            robocopy "$env:DATA_DIR\public" "services\api\public" /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+          }
+
+          Write-Host "File restore done"
+
+      - name: Install PostgreSQL
         shell: powershell
         run: |
           choco install postgresql15 --params '/Password:postgres' -y --no-progress
-          $env:Path += ";C:\Program Files\PostgreSQL\15\bin"
-          echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
-          
-          Start-Sleep -Seconds 5
-          & "C:\Program Files\PostgreSQL\15\bin\createdb.exe" -U postgres -h localhost ecsrev
-        env:
-          PGPASSWORD: postgres
+          $pgBin = "C:\Program Files\PostgreSQL\15\bin"
+          echo $pgBin >> $env:GITHUB_PATH
+          $env:Path = "$pgBin;$env:Path"
 
-      - name: Create Required Directories
+          $svc = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($svc) {
+            if ($svc.Status -ne 'Running') { Start-Service $svc.Name }
+          }
+
+          $ready = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            & "$pgBin\pg_isready.exe" -h 127.0.0.1 -U postgres | Out-Null
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $ready) { throw "PostgreSQL did not become ready" }
+
+          & "$pgBin\createdb.exe" -U postgres -h 127.0.0.1 ecsrev 2>$null
+          Write-Host "PostgreSQL ready"
+
+      - name: Restore database dump if present
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path "services\api\public\images\thumbnails"
-          New-Item -ItemType Directory -Force -Path "services\api\public\UnsecuredContent"
+          $dump = Join-Path $env:DATA_DIR "ecsrev.dump"
+          $sql  = Join-Path $env:DATA_DIR "ecsrev.sql"
+          if (Test-Path $dump) {
+            Write-Host "Restoring custom dump..."
+            & pg_restore -h 127.0.0.1 -U postgres -d ecsrev --clean --if-exists --no-owner --no-acl $dump
+          } elseif (Test-Path $sql) {
+            Write-Host "Restoring SQL dump..."
+            & psql -h 127.0.0.1 -U postgres -d ecsrev -f $sql
+          } else {
+            Write-Host "No previous dump found — fresh database"
+          }
 
-      - name: Configure API Config
+      - name: Configure API
         shell: powershell
         working-directory: ./services/api
         run: |
-          Set-Content -Path "config.json" -Value '{ "knex": { "client": "pg", "connection": { "host": "127.0.0.1", "user": "postgres", "password": "postgres", "database": "ecsrev" } } }'
+          Set-Content -Path "config.json" -Value '{"knex":{"client":"pg","connection":{"host":"127.0.0.1","user":"postgres","password":"postgres","database":"ecsrev"}}}'
 
-      - name: Run API Migrations
+      - name: Install API deps + migrate
         shell: powershell
         working-directory: ./services/api
         run: |
-          npm install
+          if (Test-Path package-lock.json) { npm ci --prefer-offline --no-audit --no-fund } else { npm install --no-audit --no-fund }
           npx knex migrate:latest
 
-      - name: Configure Appsettings
+      - name: Configure Website appsettings
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
-          $appsettings = @'
+          @'
           {
-            "Logging": {
-              "LogLevel": {
-                "Default": "Information",
-                "Microsoft.AspNetCore": "Warning"
-              }
-            },
+            "Logging": { "LogLevel": { "Default": "Information", "Microsoft.AspNetCore": "Warning" } },
             "AllowedHosts": "*",
             "ConnectionStrings": {
               "DefaultConnection": "Host=127.0.0.1;Database=ecsrev;Username=postgres;Password=postgres"
             },
             "OwnerUserId": 1
           }
-          '@
-          Set-Content -Path "appsettings.json" -Value $appsettings
+          '@ | Set-Content -Path "appsettings.json"
 
       - name: Enable Auto-Accept in ApplicationProcessorService
         shell: powershell
         run: |
           $file = "services\Roblox\Roblox.Services\Users\ApplicationProcessorService.cs"
           if (Test-Path $file) {
-            $content = Get-Content$file
-            $content -replace 'false', 'true' \vert{} Set-Content$file
-            Write-Host "Successfully patched ApplicationProcessorService.cs"
+            $content = Get-Content $file -Raw
+            $patched = $content -replace 'autoAccept\s*=\s*false', 'autoAccept = true'
+            if ($patched -eq $content) {
+              $patched = $content -replace 'AutoAccept\s*=\s*false', 'AutoAccept = true'
+            }
+            Set-Content -Path $file -Value $patched -NoNewline
+            Write-Host "Patched ApplicationProcessorService.cs"
           } else {
             Write-Host "File not found, skipping patch."
           }
@@ -94,91 +196,136 @@ jobs:
         shell: powershell
         working-directory: ./services/admin
         run: |
-          npm install
+          if (Test-Path package-lock.json) { npm ci --prefer-offline --no-audit --no-fund } else { npm install --no-audit --no-fund }
           npm run build
 
-      - name: Seed Admin User (Skylight) with BCrypt Password
+      - name: Seed admin only if missing
         shell: powershell
         run: |
-          npm install pg bcryptjs
-          node -e '
-            const { Client } = require("pg");
-            const bcrypt = require("bcryptjs");
-
-            async function seed() {
-              const client = new Client({
-                host: "127.0.0.1",
-                user: "postgres",
-                password: "postgres",
-                database: "ecsrev"
-              });
+          npm install pg bcryptjs --no-audit --no-fund
+          node -e "
+            const { Client } = require('pg');
+            const bcrypt = require('bcryptjs');
+            (async () => {
+              const raw = process.env.ADMIN_PASSWORD;
+              if (!raw) throw new Error('ADMIN_PASSWORD env is empty');
+              const client = new Client({ host: '127.0.0.1', user: 'postgres', password: 'postgres', database: 'ecsrev' });
               await client.connect();
+              const hashed = await bcrypt.hash(raw, 10);
+              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at)
+                VALUES (1, 'Skylight', \$1, true, NOW(), NOW())
+                ON CONFLICT (id) DO UPDATE SET username = 'Skylight', password = \$1, is_admin = true\`, [hashed]);
+              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, created_at, updated_at)
+                VALUES (2, 'UGC', NULL, false, NOW(), NOW()) ON CONFLICT (id) DO NOTHING\`);
+              await client.query(\`INSERT INTO \"Users\" (id, username, password, is_admin, is_banned, created_at, updated_at)
+                VALUES (12, 'BadDecisions', 'banned', false, true, NOW(), NOW()) ON CONFLICT (id) DO NOTHING\`);
+              console.log('Seed complete');
+              await client.end();
+            })().catch(e => { console.error(e); process.exit(1); });
+          "
 
-              const rawPassword = "austin00op99";
-              const hashedPassword = await bcrypt.hash(rawPassword, 10);
+      - name: Start background data saver
+        shell: powershell
+        run: |
+          $saver = @'
+          $ErrorActionPreference = "Continue"
+          $root = $env:GITHUB_WORKSPACE
+          $dataDir = Join-Path $root ".ecsrev-data"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
-              console.log("Seeding system accounts and Skylight...");
+          $trees = @(
+            @{ From = "services\api\public"; To = "files\api-public" },
+            @{ From = "services\Roblox\Roblox.Website\wwwroot"; To = "files\wwwroot" },
+            @{ From = "storage"; To = "files\storage" },
+            @{ From = "uploads"; To = "files\uploads" }
+          )
 
-              try {
-                await client.query(`
-                  INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
-                  VALUES (1, '\''Skylight'\'', $1, true, NOW(), NOW())
-                  ON CONFLICT (id) DO UPDATE SET username = '\''Skylight'\'', password = $1, is_admin = true;
-                `, [hashedPassword]);
-
-                await client.query(`
-                  INSERT INTO "Users" (id, username, password, is_admin, created_at, updated_at) 
-                  VALUES (2, '\''UGC'\'', NULL, false, NOW(), NOW())
-                  ON CONFLICT (id) DO NOTHING;
-                `);
-
-                await client.query(`
-                  INSERT INTO "Users" (id, username, password, is_admin, is_banned, created_at, updated_at) 
-                  VALUES (12, '\''BadDecisions'\'', '\''banned'\'', false, true, NOW(), NOW())
-                  ON CONFLICT (id) DO NOTHING;
-                `);
-
-                console.log("Successfully seeded Skylight (Admin), UGC, and BadDecisions!");
-              } catch (err) {
-                console.error("Seeding error:", err.message);
-              } finally {
-                await client.end();
-              }
+          function Save-Tree($fromRel, $toRel) {
+            $from = Join-Path $root $fromRel
+            $to = Join-Path $dataDir $toRel
+            if (Test-Path $from) {
+              New-Item -ItemType Directory -Force -Path $to | Out-Null
+              robocopy $from $to /MIR /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
             }
-            seed();
-          '
+          }
+
+          function Save-All {
+            try {
+              & pg_dump -h 127.0.0.1 -U postgres -d ecsrev -Fc -f (Join-Path $dataDir "ecsrev.dump")
+              & pg_dump -h 127.0.0.1 -U postgres -d ecsrev -f (Join-Path $dataDir "ecsrev.sql")
+              foreach ($t in $trees) { Save-Tree $t.From $t.To }
+              Get-Date -Format o | Set-Content (Join-Path $dataDir "last-save.txt")
+              Write-Host "DB + images/files snapshot saved at $(Get-Date)"
+            } catch {
+              Write-Host "Snapshot failed: $_"
+            }
+          }
+          Save-All
+          while ($true) {
+            Start-Sleep -Seconds 120
+            Save-All
+          }
+          '@
+          $scriptPath = Join-Path $env:RUNNER_TEMP "save-data.ps1"
+          Set-Content -Path $scriptPath -Value $saver
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WindowStyle Hidden
+          Write-Host "Background saver started (every 2 minutes)"
 
       - name: Start Native RCCService
         shell: powershell
         working-directory: ./services/RCCService
         run: |
           if (Test-Path "RCCService.exe") {
-            Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console", "-placeid:1818"
-            Write-Host "RCCService started successfully."
+            Start-Process -FilePath ".\RCCService.exe" -ArgumentList "-console","-placeid:1818"
+            Write-Host "RCCService started"
           } else {
-            Write-Host "RCCService.exe not found, skipping..."
+            Write-Host "RCCService.exe not found, skipping"
           }
 
       - name: Start Asset Validation Service (Go)
         shell: powershell
         working-directory: ./services/AssetValidationServiceV2
         run: |
-          Start-Process -FilePath "go" -ArgumentList "run", "main.go"
+          if (Test-Path "main.go") {
+            Start-Process -FilePath "go" -ArgumentList "run","main.go"
+            Write-Host "AssetValidationService started"
+          } else {
+            Write-Host "AssetValidationServiceV2/main.go not found, skipping"
+          }
 
       - name: Start .NET Website
         shell: powershell
         working-directory: ./services/Roblox/Roblox.Website
         run: |
-          Start-Process -FilePath "dotnet" -ArgumentList "run"
-          Start-Sleep -Seconds 10
+          Start-Process -FilePath "dotnet" -ArgumentList "run","--no-restore"
+          $up = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:5000" -UseBasicParsing -TimeoutSec 2
+              $up = $true
+              break
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if ($up) { Write-Host "Website is up on :5000" } else { Write-Host "Website may still be starting..." }
 
-      - name: Install and Run Cloudflared Tunnel
+      - name: Install cloudflared
+        shell: powershell
+        run: choco install cloudflared -y --no-progress
+
+      - name: Persist data artifact (pre-tunnel snapshot)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecsrev-data
+          path: .ecsrev-data
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Run Cloudflared Tunnel
         shell: powershell
         run: |
-          choco install cloudflared -y --no-progress
           Write-Host "===================================================="
-          Write-Host "Your ECSRev site is starting up!"
-          Write-Host "Look for the public *.trycloudflare.com URL below:"
+          Write-Host "ECSRev is starting. Watch for *.trycloudflare.com"
+          Write-Host "Data snapshots every 2 minutes into .ecsrev-data"
+          Write-Host "Cancel the job to stop. Next run restores the cache."
           Write-Host "===================================================="
-          
           cloudflared tunnel --url http://localhost:5000
